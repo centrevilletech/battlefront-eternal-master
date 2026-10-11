@@ -1,0 +1,29 @@
+services:
+  master:
+    image: ${APP_IMAGE:?APP_IMAGE required}
+    container_name: battlefront-eternal-master-production
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 192m
+    memswap_limit: 192m
+    cpus: 0.5
+    tmpfs: [/tmp]
+    expose: ["8080"]
+    environment:
+      TURN_SECRET: ${TURN_SECRET:?TURN_SECRET required}
+      TURN_URLS: turn:relay.battlefronteternal.com:3478?transport=udp,turn:relay.battlefronteternal.com:3478?transport=tcp,turns:relay.battlefronteternal.com:5349?transport=tcp
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:?TRUSTED_PROXIES required}
+    volumes: [master-data:/data]
+    networks:
+      proxy-web:
+        aliases: [battlefront-eternal-master-production]
+    logging:
+      driver: json-file
+      options: {max-size: "5m", max-file: "2"}
+volumes:
+  master-data:
+networks:
+  proxy-web:
+    external: true

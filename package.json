@@ -1,0 +1,18 @@
+{
+  "name": "battlefront-eternal-master",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "GPL-3.0-only",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "start": "node src/main.js"
+  },
+  "dependencies": {
+    "ipaddr.js": "2.5.0",
+    "ws": "8.22.0"
+  }
+}
