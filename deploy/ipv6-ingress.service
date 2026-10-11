@@ -1,0 +1,7 @@
+[Unit]
+Description=Preserve IPv6 source addresses for Aldine web proxy
+After=docker.service network-online.target
+Requires=docker.service
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /opt/battlefront-eternal/scripts/ipv6-ingress.sh

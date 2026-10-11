@@ -27,6 +27,23 @@ response. Relay-only listings omit endpoints. Heartbeats expire after 60 seconds
 Reports expire after 30 days. Ban policy belongs to the game server; the master
 does not deny relay admission merely because a player appears in the ban feed.
 
-Outstanding release gates: signed reachability probes, moderation administration,
+Outstanding release gates: signed reachability probes,
 sponsor approval, operational privacy review, and complete game/client integration.
 The service's tests do not establish a finished multiplayer game.
+
+Moderation runs locally with `node src/admin.js reports`, `ban KEY_ID HOURS
+REASON`, or `unban KEY_ID`, using the same `DATA_DIR`. No HTTP admin API exists.
+Back up the SQLite database with SQLite's backup API or stop the master briefly
+before copying its data volume; copying a live database without its WAL is unsafe.
+
+Aldine IPv6: Docker's IPv4-only published-port forwarding hid the caller behind
+172.19.0.1. The host ingress script attaches the existing NPM container to an
+IPv6-only Docker bridge and DNATs the public IPv6 TCP 80/443 listeners to it.
+NPM still owns TLS and all existing proxy hosts. The timer restores attachment
+after NPM recreation. These additive rules do not touch IPv4, SSH or Tailscale.
+To roll back, disable `bfe-ipv6-ingress.timer`, remove only ip6tables rules tagged
+`bfe-ipv6-source`, and disconnect NPM from `bfe-proxy-ipv6`. IPv6 web traffic then
+returns to Docker's prior forwarding, but client IP detection becomes inaccurate.
+The master trusts only NPM's exact proxy-web address; update TRUSTED_PROXIES if
+that container address changes. Web access logs are disabled for BFE API hosts,
+including query-string signaling tickets. Relay errors have bounded Docker logs.
