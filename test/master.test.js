@@ -128,3 +128,19 @@ test('signaling tickets are single-use and offers route only to listed servers',
  const response=new Promise(r=>client.ws.once('message',data=>r(JSON.parse(data))));host.ws.send(JSON.stringify({to:offer.from,type:'answer',payload:'{"sdp":"answer"}'}));assert.equal((await response).from,registration.id);
  const duplicate=new WebSocket(host.url);await new Promise(r=>duplicate.once('error',r));assert.equal(duplicate.readyState,WebSocket.CLOSED);
 });
+
+test('registered host admits 32 relay peers with separate allocation quotas', {timeout:10000}, async t => {
+  const {WebSocket}=await import('ws');const f=await fixture(t);
+  const registration=await(await f.request('/v1/servers','POST',entry)).json();
+  async function connect(keys){const r=await f.request('/v1/signal-ticket','POST',{},keys);assert.equal(r.status,200);const {ticket}=await r.json();const ws=new WebSocket(f.base.replace('http:','ws:')+'/v1/signal?ticket='+ticket);t.after(()=>ws.terminate());await new Promise((r,j)=>{ws.once('open',r);ws.once('error',j);});return ws;}
+  const host=await connect(f.keys),usernames=new Set();
+  assert.equal((await f.request('/v1/relay-credentials','POST',{serverId:registration.id,peerId:'a'.repeat(64)})).status,403);
+  for(let i=0;i<32;i++) {
+    const client=await connect(identity());const offer=new Promise(r=>host.once('message',raw=>r(JSON.parse(raw))));
+    client.send(JSON.stringify({to:registration.id,type:'offer',payload:'{}'}));const {from}=await offer;
+    const response=await f.request('/v1/relay-credentials','POST',{serverId:registration.id,peerId:from});assert.equal(response.status,200);
+    usernames.add((await response.json()).username);
+  }
+  assert.equal(usernames.size,32);
+  const outsider=identity();assert.equal((await f.request('/v1/relay-credentials','POST',{serverId:registration.id,peerId:'a'.repeat(64)},outsider)).status,403);
+});

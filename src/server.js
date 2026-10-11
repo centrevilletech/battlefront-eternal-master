@@ -324,8 +324,6 @@ export function createMaster(options = {}) {
         return send(res, 200, { ok: true });
       }
       if (path === "/v1/relay-credentials" && req.method === "POST") {
-        limit(`relay:${auth.id}`, 6);
-        limit(`relay-ip:${bucketAddress(ip)}`, 24);
         if (!options.turnSecret || !options.turnUrls?.length)
           throw fail(503, "relay unavailable");
         const target =
@@ -334,8 +332,21 @@ export function createMaster(options = {}) {
           throw fail(404, "register or select an active server first");
         if (target.listing.relayPolicy === "never")
           throw fail(403, "server disables relay");
+        let allocationId = auth.id;
+        if (data.peerId !== undefined) {
+          if (data.serverId !== auth.id || !/^[a-f0-9]{64}$/.test(data.peerId) ||
+              (routes.get(`route:${data.peerId}:${auth.id}`) ?? 0) <= now())
+            throw fail(403, "server credentials require an active incoming offer");
+          limit(`relay-host:${auth.id}`, Math.min(128, target.listing.maxPlayers * 2));
+          limit(`relay-host-ip:${bucketAddress(ip)}`, 128);
+          limit(`relay-pair:${auth.id}:${data.peerId}`, 2);
+          allocationId += ':' + data.peerId;
+        } else {
+          limit(`relay:${auth.id}`, 6);
+          limit(`relay-ip:${bucketAddress(ip)}`, 24);
+        }
         return send(res, 200, {
-          ...turnCredentials(options.turnSecret, auth.id, now()),
+          ...turnCredentials(options.turnSecret, allocationId, now()),
           urls: options.turnUrls,
         });
       }
@@ -374,7 +385,7 @@ export function createMaster(options = {}) {
     try {
       const url = new URL(req.url, "http://localhost");
       if (url.pathname !== "/v1/signal") throw Error();
-      limit(`ws:${bucketAddress(caller(req))}`, 30);
+      limit(`ws:${bucketAddress(caller(req))}`, 64);
       const token = url.searchParams.get("ticket"),
         ticket = tickets.get(token);
       tickets.delete(token);
