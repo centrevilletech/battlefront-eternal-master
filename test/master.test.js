@@ -144,3 +144,122 @@ test('registered host admits 32 relay peers with separate allocation quotas', {t
   assert.equal(usernames.size,32);
   const outsider=identity();assert.equal((await f.request('/v1/relay-credentials','POST',{serverId:registration.id,peerId:'a'.repeat(64)},outsider)).status,403);
 });
+
+async function readinessFixture(t) {
+  const { WebSocket } = await import('ws');
+  const f = await fixture(t);
+  const registration = await (await f.request('/v1/servers', 'POST', entry)).json();
+  async function connect(keys) {
+    const response = await f.request('/v1/signal-ticket', 'POST', {}, keys);
+    assert.equal(response.status, 200);
+    const { ticket } = await response.json();
+    const ws = new WebSocket(f.base.replace('http:', 'ws:') + '/v1/signal?ticket=' + ticket);
+    t.after(() => ws.terminate());
+    await new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject); });
+    return ws;
+  }
+  return { ...f, registration, connect, host: await connect(f.keys), client: await connect(identity()) };
+}
+const nextMessage = ws => new Promise(resolve => ws.once('message', raw => resolve(JSON.parse(raw))));
+const closedCode = ws => new Promise(resolve => ws.once('close', resolve));
+const readyToken = 'a'.repeat(32), readyNonce = 'b'.repeat(32);
+function readyMessage(to, type, token = readyToken, nonce = readyNonce) {
+  return JSON.stringify({ to, type, payload: JSON.stringify({ type, [type]: token, nonce }) });
+}
+async function probe(f) {
+  const incoming = nextMessage(f.host);
+  f.client.send(readyMessage(f.registration.id, 'matchProbe'));
+  return incoming;
+}
+
+test('readiness works after a full match and expired ICE route without granting ICE or relay permission', { timeout: 5000 }, async t => {
+  const f = await readinessFixture(t);
+  const offer = nextMessage(f.host);
+  f.client.send(JSON.stringify({ to: f.registration.id, type: 'offer', payload: '{}' }));
+  const { from } = await offer;
+  f.advance(121000);
+  await f.request('/v1/servers', 'POST', entry);
+  const request = await probe(f);
+  assert.equal(request.from, from);
+  const response = nextMessage(f.client);
+  f.host.send(readyMessage(from, 'matchReady'));
+  const reply = await response;
+  assert.equal(reply.from, f.registration.id);
+  assert.deepEqual(JSON.parse(reply.payload), { type: 'matchReady', matchReady: readyToken, nonce: readyNonce });
+  assert.equal((await f.request('/v1/relay-credentials', 'POST', { serverId: f.registration.id, peerId: from })).status, 403);
+  const closed = closedCode(f.client);
+  f.client.send(JSON.stringify({ to: f.registration.id, type: 'candidate', payload: '{}' }));
+  assert.equal(await closed, 1008);
+});
+
+test('readiness works without any offer and consumes exactly one matching reply', { timeout: 5000 }, async t => {
+  const f = await readinessFixture(t), request = await probe(f);
+  const response = nextMessage(f.client);
+  f.host.send(readyMessage(request.from, 'matchReady'));
+  await response;
+  const received = [];
+  f.client.on('message', raw => received.push(JSON.parse(raw)));
+  f.host.send(readyMessage(request.from, 'matchReady'));
+  const fresh = await probe(f), response2 = nextMessage(f.client);
+  f.host.send(readyMessage(fresh.from, 'matchReady'));
+  await response2;
+  assert.equal(received.length, 1, 'replayed reply is ignored without closing the host socket');
+});
+
+for (const failure of ['expired', 'wrong token', 'wrong nonce', 'different server']) {
+  test(`readiness rejects ${failure} replies`, { timeout: 5000 }, async t => {
+    const f = await readinessFixture(t), request = await probe(f);
+    let sender = f.host;
+    if (failure === 'expired') f.advance(10001);
+    if (failure === 'different server') {
+      const stranger = identity();
+      await f.request('/v1/servers', 'POST', entry, stranger);
+      sender = await f.connect(stranger);
+    }
+    const received = [];
+    f.client.on('message', raw => received.push(JSON.parse(raw)));
+    sender.send(readyMessage(request.from, 'matchReady', failure === 'wrong token' ? 'c'.repeat(32) : readyToken,
+      failure === 'wrong nonce' ? 'd'.repeat(32) : readyNonce));
+    // A WebSocket ping/pong fences the invalid reply on the same connection.
+    const pong = new Promise(resolve => sender.once('pong', resolve));
+    sender.ping(); await pong;
+    const fresh = await probe(f), response = nextMessage(f.client);
+    f.host.send(readyMessage(fresh.from, 'matchReady'));
+    await response;
+    assert.equal(received.length, 1, 'only the current valid reply is forwarded');
+  });
+}
+
+for (const failure of ['unlisted server', 'malformed payload', 'rate limit']) {
+  test(`readiness rejects ${failure} probes`, { timeout: 5000 }, async t => {
+    const f = await readinessFixture(t);
+    if (failure === 'rate limit') for (let i = 0; i < 30; i++) await probe(f);
+    const closed = closedCode(f.client);
+    f.client.send(readyMessage(failure === 'unlisted server' ? 'c'.repeat(64) : f.registration.id, 'matchProbe',
+      failure === 'malformed payload' ? 'invalid' : readyToken));
+    assert.equal(await closed, 1008);
+  });
+}
+
+test('a delayed superseded nonce cannot close the host or satisfy a later probe', { timeout: 5000 }, async t => {
+  const f = await readinessFixture(t), old = await probe(f), nonce = 'c'.repeat(32);
+  const incoming = nextMessage(f.host);
+  f.client.send(readyMessage(f.registration.id, 'matchProbe', readyToken, nonce));
+  await incoming;
+  const received = [], response = nextMessage(f.client);
+  f.client.on('message', raw => received.push(JSON.parse(raw)));
+  f.host.send(readyMessage(old.from, 'matchReady'));
+  f.host.send(readyMessage(old.from, 'matchReady', readyToken, nonce));
+  assert.equal(JSON.parse((await response).payload).nonce, nonce);
+  assert.equal(received.length, 1);
+});
+
+for (const field of ['matchProbe', 'nonce']) {
+  test(`readiness rejects coercible array ${field}`, { timeout: 5000 }, async t => {
+    const f = await readinessFixture(t), payload = { type: 'matchProbe', matchProbe: readyToken, nonce: readyNonce };
+    payload[field] = [payload[field]];
+    const closed = closedCode(f.client);
+    f.client.send(JSON.stringify({ to: f.registration.id, type: 'matchProbe', payload: JSON.stringify(payload) }));
+    assert.equal(await closed, 1008);
+  });
+}

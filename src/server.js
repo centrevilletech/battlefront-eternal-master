@@ -115,7 +115,8 @@ export function createMaster(options = {}) {
     nonces = new Map(),
     rates = new Map(),
     tickets = new Map(),
-    sockets = new Map();
+    sockets = new Map(),
+    readiness = new Map();
   const noticeVersion = options.noticeVersion ?? "2026-10-11";
   const trusted = new Set((options.trustedProxies ?? []).map(address));
   const signingKey = options.signingKey
@@ -134,7 +135,7 @@ export function createMaster(options = {}) {
   function sweep() {
     const t = now();
     for (const [id, s] of servers) if (s.expires <= t) servers.delete(id);
-    for (const m of [nonces, tickets, rates])
+    for (const m of [nonces, tickets, rates, readiness])
       for (const [k, v] of m)
         if ((typeof v === "number" ? v : v.expires) <= t) m.delete(k);
     db.prepare("DELETE FROM reports WHERE created < ?").run(t - 30 * 86400000);
@@ -403,26 +404,52 @@ export function createMaster(options = {}) {
             const message = JSON.parse(raw.toString());
             if (
               !/^[a-f0-9]{64}$/.test(message.to) ||
-              !["offer", "answer", "candidate", "reject"].includes(
+              !["offer", "answer", "candidate", "reject", "matchProbe", "matchReady"].includes(
                 message.type,
               ) ||
               typeof message.payload !== "string" ||
               message.payload.length > 24000
             )
               throw Error();
-            // A client may contact a listed server. Replies require an existing offer route.
-            const route = `route:${message.to}:${ticket.id}`,
-              outbound = `route:${ticket.id}:${message.to}`;
-            if (message.type === "offer") {
-              const target = servers.get(message.to);
-              if (!target || target.expires <= now()) throw Error();
-              if (routes.size >= 10000) throw Error();
-              routes.set(outbound, now() + 120000);
-            } else if (
-              (routes.get(route) ?? 0) <= now() &&
-              (routes.get(outbound) ?? 0) <= now()
-            )
-              throw Error();
+            // Match readiness must work after the old match's ICE route expires.
+            // Its one-shot reply permission never authorizes SDP, ICE or TURN.
+            if (message.type === "matchProbe" || message.type === "matchReady") {
+              const probe = message.type === "matchProbe";
+              const value = JSON.parse(message.payload);
+              if (!value || value.type !== message.type || Object.keys(value).length !== 3 ||
+                  typeof value[message.type] !== 'string' || typeof value.nonce !== 'string' ||
+                  !/^[a-f0-9]{32}$/.test(value[message.type]) || !/^[a-f0-9]{32}$/.test(value.nonce)) throw Error();
+              const host = probe ? message.to : ticket.id;
+              const client = probe ? ticket.id : message.to;
+              const listed = servers.get(host);
+              if (!listed || listed.expires <= now()) throw Error();
+              const key = `${host}:${client}`;
+              if (probe) {
+                limit(`readiness:${ticket.id}`, 30);
+                if (!readiness.has(key) && readiness.size >= 10000) throw Error();
+                readiness.set(key, { token: value.matchProbe, nonce: value.nonce, expires: now() + 10000 });
+              } else {
+                const pending = readiness.get(key);
+                // A timed-out probe may be superseded before its answer arrives.
+                // Discard it without disconnecting the host's shared socket.
+                if (!pending || pending.expires <= now() || pending.token !== value.matchReady || pending.nonce !== value.nonce) return;
+                readiness.delete(key);
+              }
+            } else {
+              // A client may contact a listed server. Replies require an existing offer route.
+              const route = `route:${message.to}:${ticket.id}`,
+                outbound = `route:${ticket.id}:${message.to}`;
+              if (message.type === "offer") {
+                const target = servers.get(message.to);
+                if (!target || target.expires <= now()) throw Error();
+                if (routes.size >= 10000) throw Error();
+                routes.set(outbound, now() + 120000);
+              } else if (
+                (routes.get(route) ?? 0) <= now() &&
+                (routes.get(outbound) ?? 0) <= now()
+              )
+                throw Error();
+            }
             const target = sockets.get(message.to);
             if (!target || target.readyState !== WebSocket.OPEN) return;
             if (target.bufferedAmount > 65536) {
