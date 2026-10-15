@@ -228,7 +228,7 @@ export function createMaster(options = {}) {
           operator: options.operator ?? "Josh Lambert",
           contact:
             options.contact ??
-            "https://github.com/joshualambert/battlefront-eternal-master/issues",
+            "https://github.com/centrevilletech/battlefront-eternal-master/issues",
           privacy: {
             text: "Online play processes your IP address for connectivity and abuse prevention. Independent servers and relays process connection metadata. Location sharing is optional.",
             ipRetention:
