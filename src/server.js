@@ -42,6 +42,48 @@ function sameAddress(a, b) {
     return false;
   }
 }
+// What the server browser shows (the server's src/browser-info.js): a value
+// that does not check out is left out rather than the listing refused.
+const optional = (check) => {
+  try {
+    return check();
+  } catch {
+    return null;
+  }
+};
+const https = (x) => {
+  const url = new URL(text(x, 512));
+  if (url.protocol !== "https:" || url.username || url.password)
+    throw fail(400, "invalid url");
+  return url.href;
+};
+const slug = (x) => {
+  if (typeof x !== "string" || !/^[a-z0-9_-]{1,64}$/i.test(x))
+    throw fail(400, "invalid name");
+  return x;
+};
+// The battle a player's page loads for a server: its own keys only, each
+// checked, since anything else in it could change how the page runs.
+const BATTLE_KEYS = {
+  map: /^[a-z0-9_-]{1,64}$/i,
+  side: /^[a-z0-9_-]{1,64}$/i,
+  mission: /^[a-z0-9_-]{1,64}$/i,
+  era: /^(cw|gcw)$/,
+  ai: /^(classic|off)$/,
+  seed: /^\d{1,10}$/,
+  match: /^[a-f0-9]{32}$/,
+};
+export function battleQuery(value) {
+  if (typeof value !== "string" || value.length > 512 || !value.startsWith("?"))
+    throw fail(400, "invalid query");
+  const out = new URLSearchParams();
+  for (const [key, v] of new URLSearchParams(value)) {
+    if (!BATTLE_KEYS[key]?.test(v) || out.has(key)) throw fail(400, "invalid query");
+    out.set(key, v);
+  }
+  if (!out.has("map")) throw fail(400, "invalid query");
+  return "?" + out;
+}
 export function listing(value, owner, caller) {
   const policy = value.relayPolicy ?? "auto";
   if (!["auto", "never", "always"].includes(policy))
@@ -52,16 +94,18 @@ export function listing(value, owner, caller) {
     policy === "always"
       ? []
       : endpoints.map((e) => {
-          // Only the source address is accepted without a separate signed reachability proof.
+          // Only the source address is accepted without a separate signed
+          // reachability proof; an endpoint naming none is at it.
+          const at = e.address ?? caller;
           if (
-            !sameAddress(e.address, caller) ||
-            ipaddr.process(e.address).range() !== "unicast"
+            !sameAddress(at, caller) ||
+            ipaddr.process(at).range() !== "unicast"
           )
             throw fail(400, "endpoint must be public request source");
           if (!["udp", "webrtc"].includes(e.transport))
             throw fail(400, "unsupported endpoint");
           return {
-            address: address(e.address),
+            address: address(at),
             port:
               integer(e.port, 65535) ||
               (() => {
@@ -101,7 +145,49 @@ export function listing(value, owner, caller) {
     endpoints: safe,
     fingerprint,
     location: value.location == null ? null : text(value.location, 80),
+    description:
+      value.description == null
+        ? null
+        : optional(() => text(value.description, 280)),
+    sponsor:
+      value.sponsor == null
+        ? null
+        : optional(() => ({
+            name: text(value.sponsor.name, 60),
+            url: value.sponsor.url == null ? null : optional(() => https(value.sponsor.url)),
+            logo: value.sponsor.logo == null ? null : optional(() => https(value.sponsor.logo)),
+          })),
+    query: value.query == null ? null : optional(() => battleQuery(value.query)),
+    battle:
+      value.battle == null
+        ? null
+        : optional(() => ({
+            map: slug(value.battle.map),
+            mapName: value.battle.mapName == null ? null : text(value.battle.mapName, 60),
+            side: value.battle.side == null ? null : slug(value.battle.side),
+            era: ["cw", "gcw"].includes(value.battle.era) ? value.battle.era : null,
+            mode: value.battle.mode == null ? null : slug(value.battle.mode),
+          })),
+    bots: typeof value.bots === "boolean" ? value.bots : null,
+    autoAssignTeams:
+      typeof value.autoAssignTeams === "boolean" ? value.autoAssignTeams : null,
+    uptime:
+      Number.isSafeInteger(value.uptime) && value.uptime >= 0 && value.uptime <= 3650 * 86400
+        ? value.uptime
+        : null,
   };
+}
+
+// A direct server's heartbeats come over IPv4 and IPv6 in turn, each naming
+// its game port at the address it comes from: the listing keeps the last
+// endpoint each family showed (for the same port and transport) while it is
+// fresh, so players on either family can reach and time it.
+export function mergeEndpoints(item, previous, at) {
+  const seen = { ...(previous ?? {}) };
+  for (const e of item.endpoints) seen[`${ipaddr.process(e.address).kind()}:${e.transport}:${e.port}`] = { endpoint: e, at };
+  const wanted = new Set(item.endpoints.map((e) => `${e.transport}:${e.port}`));
+  const kept = Object.fromEntries(Object.entries(seen).filter(([key, value]) => at - value.at <= 90000 && wanted.has(key.slice(key.indexOf(":") + 1))));
+  return { endpoints: Object.values(kept).map((value) => value.endpoint), seen: kept };
 }
 export function createMaster(options = {}) {
   const now = options.now ?? Date.now,
@@ -316,7 +402,9 @@ export function createMaster(options = {}) {
         ).length;
         if (perAddress >= 8) throw fail(429, "server limit for address");
         const item = listing(data, auth, ip);
-        servers.set(auth.id, { listing: item, ip, expires: now() + ttl });
+        const { endpoints, seen } = mergeEndpoints(item, servers.get(auth.id)?.seen, now());
+        item.endpoints = endpoints;
+        servers.set(auth.id, { listing: item, ip, expires: now() + ttl, seen });
         return send(res, match ? 200 : 201, item);
       }
       if (match && req.method === "DELETE") {
