@@ -69,7 +69,7 @@ const BATTLE_KEYS = {
   side: /^[a-z0-9_-]{1,64}$/i,
   mission: /^[a-z0-9_-]{1,64}$/i,
   era: /^(cw|gcw)$/,
-  ai: /^(classic|off)$/,
+  ai: /^(classic|enhanced|off)$/,
   seed: /^\d{1,10}$/,
   match: /^[a-f0-9]{32}$/,
 };

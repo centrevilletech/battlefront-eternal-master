@@ -45,7 +45,8 @@ test("the listing carries what the server browser shows, and leaves out what doe
 
 test("a page's battle query keeps to the battle's own keys", () => {
   assert.equal(battleQuery("?map=bes2&side=imp&ai=off&seed=1&match=" + "f".repeat(32)), "?map=bes2&side=imp&ai=off&seed=1&match=" + "f".repeat(32));
-  for (const bad of ["?map=bes2&debug=1", "?side=rep", "?map=bes2&ai=enhanced", "?map=bes2&map=nab2", "map=bes2", "?map=<x>"]) assert.throws(() => battleQuery(bad), /invalid query/, bad);
+  assert.equal(battleQuery("?map=bes2&side=rep&ai=enhanced&seed=1"), "?map=bes2&side=rep&ai=enhanced&seed=1");
+  for (const bad of ["?map=bes2&debug=1", "?side=rep", "?map=bes2&ai=expert", "?map=bes2&map=nab2", "map=bes2", "?map=<x>"]) assert.throws(() => battleQuery(bad), /invalid query/, bad);
 });
 
 test("a direct server is listed at the address of each family its heartbeats come from, while fresh", async (t) => {
